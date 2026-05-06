@@ -1,50 +1,54 @@
-import os
-from crewai import Agent, LLM
-from tools import medical_search_tool
-from dotenv import load_dotenv
+from schemas import UserData, LesionData, Cosmetic
+from interfaces import LLMService, DatabaseService, KnowledgeSearchService
 
-load_dotenv()
+class AgentA_Treatment:
+    def __init__(self, llm_service: LLMService):
+        self.llm = llm_service
 
-# 고지능 엔진 (전문의, 비평가용 - Groq)
-groq_llm = LLM(
-    model="groq/llama-3.3-70b-versatile",
-    api_key=os.getenv("GROQ_API_KEY")
-)
+    async def generate_report(self, user: UserData, lesion: LesionData) -> str:
+        prompt = f"""
+        사용자 정보: 피부타입 {user.skin_type}, 예민함 여부 {user.is_sensitive}
+        병변 정보: {lesion.predicted_disease} (확률 {lesion.probability}%)
+        위 정보를 바탕으로 알맞은 개인화 처치법을 전문가적로서 3줄 이내로 작성.
+        """
+        return await self.llm.generate_text(prompt)
+    
+class AgentB_TimeSeries:
+    def __init__(self, llm_service: LLMService, db_service: DatabaseService):
+        self.llm = llm_service
+        self.db = db_service
 
-# 보안 엔진 (매니저용 - 로컬 Ollama)
-ollama_llm = LLM(
-    model="ollama/llama3.1",
-    base_url="http://localhost:11434"
-)
+    def analyze_changes(self, current_lesion: LesionData) -> str:
+        past_lesion = self.db.get_past_lesion(current_lesion.user_id, current_lesion.lesion_id)
+        
+        if not past_lesion:
+            return "과거 데이터가 없어 시계열 분석을 생략합니다."
+            
+        prompt = f"""
+        과거 병변 크기: {past_lesion.size_value}
+        현재 병변 크기: {current_lesion.size_value}
+        위 두 데이터를 비교하여 변화 양상 및 징후를 객관적으로 보고.
+        """
+        return self.llm.generate_text(prompt)
 
-# 1. 컨텍스트 매니저 (개인정보 보호 및 공감, Ollama)
-context_manager = Agent(
-    role='컨텍스트 매니저 및 게이트키퍼',
-    goal='사용자 데이터의 누락을 체크하고, 최종 결과를 따뜻한 말투로 보정하여 전달합니다.',
-    backstory='''당신은 환자의 첫인상과 끝인상을 책임집니다. 데이터가 부족하면 분석을 중단시키고
-    추가 입력을 요청해야 합니다. 말투는 적당한 공감이 섞인 친근한 존댓말을 사용하세요.''',
-    llm=ollama_llm, # 수정된 Ollama LLM 객체 연결
-    verbose=True,
-    allow_delegation=True
-)
+class AgentC_Cosmetic:
+    def __init__(self, llm_service: LLMService, search_service: KnowledgeSearchService):
+        self.llm = llm_service
+        self.search = search_service
 
-# 2. 임상 전문의 (Groq)
-specialist = Agent(
-    role='임상 전문의 (SOAP 분석가)',
-    goal='이미지 분석 결과와 문진 데이터를 기반으로 보수적인 감별 진단을 수행합니다.',
-    backstory='''당신은 15년 경력의 피부과 전문의입니다. 위음성 리스크를 줄이기 위해 
-    미세한 가능성도 놓치지 않고 SOAP 형식에 맞춰 진단합니다.''',
-    llm=groq_llm,
-    tools=[medical_search_tool],
-    allow_delegation=False
-)
-
-# 3. 안전 비평가 (근거 검증, Groq, 추후 효율성 고도화)
-safety_shield = Agent(
-    role='의학 통계 안전 비평가',
-    goal='전문의의 판단을 논문 근거로 검증하고, 크롬바흐 알파 0.8 미만인 연구는 배제합니다.',
-    backstory='''당신은 매우 깐깐한 검토관입니다. 연구의 신뢰도 계수가 0.8 이상인지, 
-    이해관계가 얽혀있는지 확인하여 위음성 리스크가 30%를 넘는지 판정합니다.''',
-    llm=groq_llm,
-    allow_delegation=False
-)
+    def analyze_cosmetic(self, user: UserData, cosmetic: Cosmetic) -> str:
+        # 1. 성분 효과 검색 (RAG)
+        effects = []
+        for ingredient in cosmetic.ingredients:
+            effect_info = self.search.search_ingredient_effect(ingredient)
+            effects.append(f"{ingredient}: {effect_info}")
+            
+        effects_str = "\n".join(effects)
+        
+        # 2. LLM을 통한 최종 분석
+        prompt = f"""
+        사용자 피부: {user.skin_type}, 예민함 {user.is_sensitive}
+        화장품 성분별 효능 논문 데이터: {effects_str}
+        위 논문 데이터를 기반으로, 이 화장품이 사용자 피부 병변에 미칠 영향을 검증하고 추천 여부를 작성해.
+        """
+        return self.llm.generate_text(prompt)
